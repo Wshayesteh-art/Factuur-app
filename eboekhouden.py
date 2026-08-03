@@ -78,7 +78,8 @@ def _zoek_relatiecode_op_naam(soap_client, session_id, sec2, naam):
  
 def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnummer,
                    omschrijving, betaalrekening, regels, relatiecode="", betalingstermijn="0",
-                   crediteurenrekening="1700", eu_leverancier=False, kruispost=None):
+                   crediteurenrekening="1700", eu_leverancier=False, kruispost=None,
+                   zoeknaam_relatie=None):
     """
     Boekt één factuur of bonnetje (met mogelijk meerdere BTW-regels).
  
@@ -124,7 +125,8 @@ def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnumme
  
         # Geen relatiecode meegegeven? Probeer 'm automatisch op te zoeken op naam.
         if soort == "FactuurOntvangen" and not (relatiecode or "").strip():
-            relatiecode = _zoek_relatiecode_op_naam(soap_client, session_id, sec2, leverancier) or ""
+            zoeknaam = zoeknaam_relatie or leverancier
+            relatiecode = _zoek_relatiecode_op_naam(soap_client, session_id, sec2, zoeknaam) or ""
  
         if soort == "FactuurOntvangen" and not relatiecode:
             raise EBoekhoudenError(
