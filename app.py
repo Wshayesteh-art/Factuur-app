@@ -39,18 +39,88 @@ SESSIONS = {}
 BURGERME_BETAALREKENINGEN = [
     ("1000", "Kas"),
     ("1010", "Bank"),
+    ("1011", "Spaarrekening ING"),
     ("23102", "Pin"),
     ("23103", "Thuisbezorgd"),
     ("23104", "Mollie Web"),
+    ("23105", "Fooi"),
     ("23106", "Uber"),
 ]
  
 BURGERME_KOSTENREKENINGEN = [
-    ("7021", "Inkoop BTW 21%"),
-    ("7022", "Inkoop BTW 9%"),
-    ("7024", "Inkoop BTW 0%"),
-    ("7012", "Overige inkopen"),
+    # Personeelskosten
+    ("40000", "Salarissen"),
+    ("40100", "Premies en sociale lasten"),
+    ("40150", "Pensioenen"),
+    ("40600", "Kantine en consumptie"),
+    ("40950", "Vakantiegeld"),
+    ("40960", "Vakantiedagen"),
+    ("40972", "Overwerk"),
+    ("40991", "Netto inhouding"),
+    # Huisvestingskosten
+    ("41000", "Huur bedrijfspand"),
+    ("41200", "Gas, water & elektra"),
+    ("41300", "Onderhoud pand"),
+    ("41320", "Afval ophalen en verwerken"),
+    ("41400", "Schoonmaakkosten"),
+    ("414001", "Overige Huisvestingkosten"),
+    ("414002", "Huur terras"),
+    # Autokosten
+    ("42200", "Brandstof"),
+    ("42900", "Verkeersboetes"),
+    ("42950", "Parkeergelden"),
+    ("42990", "Overige autokosten"),
+    ("43001", "Lease e-bikes"),
+    ("43002", "Onderhoud e-bikes"),
+    ("43003", "Onderhoud scooters"),
+    # Afschrijvingen
+    ("4335", "Afschr. Inventarissen"),
+    ("4340", "Afschr. Hardware"),
+    ("4341", "Afschr. Goodwill"),
+    ("4342", "Afschr. auto"),
+    # Verkoop-/marketingkosten
+    ("44051", "Reclamekosten Thuisbezorgd"),
+    ("44750", "Franchisevergoeding"),
+    ("44751", "Marketingkosten"),
+    ("44991", "Kosten Thuisbezorgd"),
+    ("44992", "Kosten Mollie"),
+    ("44994", "Kosten pinapparaat"),
+    ("44995", "CMS abonnement"),
+    ("44996", "Kosten Uber"),
+    ("4500", "Contributies en abonnementen"),
+    ("4510", "Reclame en advertenties"),
+    ("45100", "Telefoon- en internetkosten"),
+    ("4520", "Representatie en verteer"),
+    ("4530", "Reis- en verblijfkosten"),
+    ("45300", "Kantoorartikelen en drukwerk"),
+    ("45310", "Kleine aanschaffen kantoor"),
+    ("45351", "Softwarekosten"),
+    ("4540", "Relatiegeschenken"),
+    ("45400", "Verzekeringen algemeen"),
+    ("45403", "Verzekering scooters"),
+    ("4550", "Bankkosten"),
+    ("45500", "Administratie- en accountantskosten"),
+    ("45760", "Incassokosten (boete)"),
+    ("45800", "Bankkosten"),
+    ("4590", "Overige verkoopkosten"),
+    ("45990", "Overige algemene kosten"),
+    ("45991", "Keukenspullen"),
+    ("45997", "Beveiligingskosten"),
+    ("4600", "Kilometervergoeding"),
+    ("4700", "Kantoorbenodigdheden"),
+    ("47000", "Aanschaf kleine machines en gereedschap"),
     ("47001", "Huur milkshakemachine"),
+    ("47100", "Onderhoud machines en installaties"),
+    ("4740", "Drukwerk, porti en vrachten"),
+    ("4750", "Telefoon en internet"),
+    ("4790", "Overige kantoorkosten"),
+    ("4810", "Accountants- en administratiekosten"),
+    ("4850", "Cursussen/seminars"),
+    ("4860", "Vakliteratuur"),
+    ("4900", "Betalingsverschillen"),
+    ("4950", "Oninbare vorderingen"),
+    # Inkopen
+    ("7000", "Inkopen"),
     ("70000", "Frituurolie"),
     ("70001", "Keuken"),
     ("70003", "Milkshake"),
@@ -62,14 +132,11 @@ BURGERME_KOSTENREKENINGEN = [
     ("70009", "Emballage vanGelder"),
     ("70010", "Emballage Hanos"),
     ("70011", "Emballage flessen/blikjes"),
-    ("42200", "Brandstof"),
-    ("42950", "Parkeergelden"),
-    ("45300", "Kantoorartikelen en drukwerk"),
-    ("45351", "Softwarekosten"),
-    ("44991", "Kosten Thuisbezorgd"),
-    ("44992", "Kosten Mollie"),
-    ("44996", "Kosten Uber"),
-    ("4500", "Contributies en abonnementen"),
+    ("70012", "Overige inkopen"),
+    ("7021", "Inkoop BTW 21%"),
+    ("7022", "Inkoop BTW 9%"),
+    ("7024", "Inkoop BTW 0%"),
+    ("7060", "Inkoop zonder factuur"),
 ]
  
 # Generieke kostenrekening per BTW-tarief - dit is de standaard voor élke
@@ -634,12 +701,12 @@ def process_invoice():
                 regel["kostenrekening"] = vaste_kostenrekening
             elif kostentype == "algemene_kost":
                 # Algemene kosten (huur, verzekering, abonnementen, etc.) horen niet
-                # op de inkoop-BTW-rekeningen thuis - "Overige inkopen" is hier een
-                # duidelijke plek-houder die om handmatige controle vraagt.
-                regel["kostenrekening"] = "7012"
+                # op de inkoop-rekeningen thuis - "Overige algemene kosten" is hier
+                # een duidelijke plek-houder die om handmatige controle vraagt.
+                regel["kostenrekening"] = "45990"
             else:
                 # Inkoop van materiaal/goederen die met de omzet te maken heeft
-                regel["kostenrekening"] = BTW_KOSTENREKENING_DEFAULT.get(btw_pct, "7012")
+                regel["kostenrekening"] = BTW_KOSTENREKENING_DEFAULT.get(btw_pct, "70012")
             regel["betaalrekening"] = standaard_betaalrekening
         SESSIONS[session_id].append(data)
  
@@ -662,34 +729,26 @@ def download_excel(session_id):
     ws = wb.active
     ws.title = "Facturen"
  
-    headers = [
-        "Bestandsnaam", "Leverancier", "Factuurdatum", "Factuurnummer",
-        "BTW %", "Bedrag excl. BTW", "BTW bedrag", "Bedrag incl. BTW", "Omschrijving",
-    ]
+    headers = ["Leverancier", "Datum", "Factuurnummer", "BTW %", "Bedrag", "Omschrijving"]
     ws.append(headers)
  
     for row in rows:
         btw_regels = row.get("btw_regels") or []
         if not btw_regels:
             # Fallback: geen btw_regels gevonden, toch één lege regel zodat de factuur niet verdwijnt
-            btw_regels = [{"btw_percentage": None, "bedrag_excl_btw": None, "btw_bedrag": None}]
+            btw_regels = [{"btw_percentage": None, "bedrag_excl_btw": None}]
  
         for regel in btw_regels:
-            excl = regel.get("bedrag_excl_btw")
-            btw = regel.get("btw_bedrag")
-            try:
-                incl = float(excl) + float(btw)
-            except (TypeError, ValueError):
-                incl = None
+            btw_pct = regel.get("btw_percentage")
+            # Bij 0%/geen BTW laten we het BTW%-vakje leeg (geen "0%"), zoals gevraagd -
+            # dan staat er alleen het bedrag, zonder BTW-aanduiding.
+            btw_weergave = f"{int(btw_pct)}%" if btw_pct else ""
             ws.append([
-                row.get("bestandsnaam"),
                 row.get("leverancier"),
                 row.get("factuurdatum"),
                 row.get("factuurnummer"),
-                regel.get("btw_percentage"),
-                excl,
-                btw,
-                incl,
+                btw_weergave,
+                regel.get("bedrag_excl_btw"),
                 row.get("omschrijving"),
             ])
  
