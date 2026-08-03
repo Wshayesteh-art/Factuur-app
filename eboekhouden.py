@@ -204,3 +204,4 @@ def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnumme
                 soap_client.service.CloseSession(session_id)
             except Exception:
                 pass
+ 
