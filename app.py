@@ -1,3 +1,4 @@
+
 """
 Factuur Upload & Extractie Tool
 --------------------------------
@@ -19,6 +20,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, send_file, render_template_string
 from openpyxl import Workbook
 import anthropic
+import eboekhouden
  
 app = Flask(__name__)
  
@@ -29,6 +31,133 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY els
 # In-memory opslag van resultaten per sessie (voor een eerste werkende versie)
 # Later kan dit naar een echte database, maar voor nu is dit prima om te testen.
 SESSIONS = {}
+ 
+# Relevante grootboekrekeningen voor BurgerMe Venlo (subset uit het volledige
+# rekeningschema, alleen betaalmiddelen + inkoop-gerelateerde rekeningen).
+# Voor nu hardcoded voor deze ene klant; bij uitbreiding naar andere klanten
+# maken we dit per klant instelbaar.
+BURGERME_BETAALREKENINGEN = [
+    ("1000", "Kas"),
+    ("1010", "Bank"),
+    ("23102", "Pin"),
+    ("23103", "Thuisbezorgd"),
+    ("23104", "Mollie Web"),
+    ("23106", "Uber"),
+]
+ 
+BURGERME_KOSTENREKENINGEN = [
+    ("7021", "Inkoop BTW 21%"),
+    ("7022", "Inkoop BTW 9%"),
+    ("7024", "Inkoop BTW 0%"),
+    ("7012", "Overige inkopen"),
+    ("47001", "Huur milkshakemachine"),
+    ("70000", "Frituurolie"),
+    ("70001", "Keuken"),
+    ("70003", "Milkshake"),
+    ("70004", "Dranken 9% btw"),
+    ("70005", "Dranken 21% btw"),
+    ("70006", "Verpakkingen"),
+    ("70007", "Speelgoed"),
+    ("70008", "Emballage Sligro"),
+    ("70009", "Emballage vanGelder"),
+    ("70010", "Emballage Hanos"),
+    ("70011", "Emballage flessen/blikjes"),
+    ("42200", "Brandstof"),
+    ("42950", "Parkeergelden"),
+    ("45300", "Kantoorartikelen en drukwerk"),
+    ("45351", "Softwarekosten"),
+    ("44991", "Kosten Thuisbezorgd"),
+    ("44992", "Kosten Mollie"),
+    ("44996", "Kosten Uber"),
+    ("4500", "Contributies en abonnementen"),
+]
+ 
+# Generieke kostenrekening per BTW-tarief - dit is de standaard voor élke
+# leverancier, tenzij een specifieke regel (zie hieronder) iets anders aangeeft
+# (bijv. een vast terugkerende kostenpost zoals een machine-huur).
+BTW_KOSTENREKENING_DEFAULT = {
+    21: "7021",  # Inkoop BTW 21%
+    9: "7022",   # Inkoop BTW 9%
+    0: "7024",   # Inkoop BTW 0%
+}
+ 
+# Vaste boekingsvoorbeelden per leverancier voor BurgerMe Venlo, aangeleverd door
+# Wais. Zodra de herkende leverancier hierop matcht (ongeacht hoofdletters, op basis
+# van een deel van de naam), gebruiken we relatiecode + betalingstermijn hieruit.
+# Optionele sleutels per leverancier:
+#   - kostenrekening: vaste rekening voor ALLE regels (bijv. een vaste huurpost)
+#   - kostenrekening_per_btw: dict, override voor één specifiek BTW-tarief
+#     (bijv. de 0%-regel van een emballage-leverancier gaat naar hun eigen
+#     emballage-rekening i.p.v. de generieke 7024)
+#   - kruispost: {"kostenrekening": ..., "kruispost_rekening": ...} - voor
+#     bezorgplatforms (Thuisbezorgd/Uber Eats/Mollie): naast de kostenregel wordt
+#     automatisch een tweede, negatieve verrekeningsregel geboekt tegen de
+#     kruispost-rekening (zo staat het ook al in e-Boekhouden)
+#   - eu_leverancier: True - gebruik de BTW-code voor "Leveringen/diensten van
+#     binnen EU 0%" (verlegde BTW) i.p.v. de gewone "Geen btw"-code
+# Sleutel: (deel van) leveranciersnaam in kleine letters.
+BURGERME_LEVERANCIER_MAPPING = {
+    "dupon": {
+        "relatiecode": "9",
+        "betalingstermijn": "14",
+        # geen vaste kostenrekening: valt terug op BTW-tarief (7021/7022/7024)
+        # let op: bij een specifieke huurpost (bijv. milkshakemachine) gebruikt
+        # Wais handmatig 47001 i.p.v. de generieke rekening
+    },
+    "ijsexpress": {
+        "relatiecode": "0121",
+        "betalingstermijn": "14",
+    },
+    "thuisbezorgd": {
+        "relatiecode": None,  # nog te bevestigen door Wais - laat leeg tot bekend
+        "betalingstermijn": "0",
+        "kruispost": {"kostenrekening": "44991", "kruispost_rekening": "23103"},
+    },
+    "uber eats": {
+        "relatiecode": "0122",
+        "betalingstermijn": "0",
+        "kruispost": {"kostenrekening": "44996", "kruispost_rekening": "23106"},
+    },
+    "mollie": {
+        "relatiecode": "0104",
+        "betalingstermijn": "14",
+        "kruispost": {"kostenrekening": "44992", "kruispost_rekening": "23104"},
+    },
+    "simplydelivery": {
+        "relatiecode": "0113",
+        "betalingstermijn": "14",
+        "kostenrekening": "45351",  # Softwarekosten
+        "eu_leverancier": True,
+    },
+    "van gelder": {
+        "relatiecode": "0005",
+        "betalingstermijn": "0",
+        "kostenrekening_per_btw": {0: "70009"},  # Emballage van Gelder
+    },
+    "sligro": {
+        "relatiecode": "0004",
+        "betalingstermijn": "14",
+        "kostenrekening_per_btw": {0: "70008"},  # Emballage Sligro
+    },
+    "meyer quick service": {
+        "relatiecode": "0003",
+        "betalingstermijn": "14",
+        "eu_leverancier": True,
+        # geen vaste kostenrekening: valt terug op BTW-tarief, met 70006
+        # (verpakkingen) als handmatige keuze-optie voor verpakking-regels
+    },
+}
+ 
+ 
+def zoek_leverancier_mapping(leverancier_naam):
+    """Zoekt of de herkende leveranciersnaam matcht met een vaste mapping."""
+    if not leverancier_naam:
+        return None
+    naam_lower = leverancier_naam.lower()
+    for sleutel, mapping in BURGERME_LEVERANCIER_MAPPING.items():
+        if sleutel in naam_lower:
+            return mapping
+    return None
  
 UPLOAD_PAGE = """
 <!DOCTYPE html>
@@ -59,6 +188,12 @@ UPLOAD_PAGE = """
     button { background: #2563eb; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }
     button:disabled { background: #aaa; cursor: not-allowed; }
     #downloadBtn { background: #16a34a; margin-top: 16px; display: none; }
+    #boekBtn { background: #7c3aed; margin-top: 16px; margin-left: 8px; display: none; }
+    #reviewTable { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; display: none; }
+    #reviewTable th, #reviewTable td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+    #reviewTable th { background: #f3f4f6; }
+    #reviewTable select, #reviewTable input { width: 100%; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; padding: 3px; }
+    .boek-status { font-size: 12px; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -77,6 +212,18 @@ UPLOAD_PAGE = """
  
   <button id="processBtn" disabled>Verwerk facturen</button>
   <a id="downloadBtn" href="#"><button type="button">Download Excel</button></a>
+  <button id="boekBtn" type="button">Boek in e-Boekhouden</button>
+ 
+  <table id="reviewTable">
+    <thead>
+      <tr>
+        <th>Bestand</th><th>Leverancier</th><th>Datum</th><th>Factuurnr</th>
+        <th>BTW%</th><th>Excl. BTW</th><th>BTW bedrag</th>
+        <th>Betaalrekening</th><th>Kostenrekening</th><th>Relatiecode</th><th>Betalingstermijn</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="reviewBody"></tbody>
+  </table>
  
   <script>
     const dropzone = document.getElementById('dropzone');
@@ -86,8 +233,15 @@ UPLOAD_PAGE = """
     const fileList = document.getElementById('fileList');
     const processBtn = document.getElementById('processBtn');
     const downloadBtn = document.getElementById('downloadBtn');
+    const boekBtn = document.getElementById('boekBtn');
+    const reviewTable = document.getElementById('reviewTable');
+    const reviewBody = document.getElementById('reviewBody');
     let files = [];
     let sessionId = null;
+    let processedRows = []; // bewaart de (bewerkbare) data per verwerkte factuur, incl. rekeningkeuzes
+    let rekeningOpties = { betaalrekeningen: [], kostenrekeningen: [] };
+ 
+    fetch('/api/rekeningen').then(r => r.json()).then(d => { rekeningOpties = d; });
  
     dropzone.addEventListener('click', () => fileInput.click());
     dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
@@ -143,6 +297,7 @@ UPLOAD_PAGE = """
           if (data.success) {
             document.getElementById('status-' + i).textContent = 'OK';
             document.getElementById('status-' + i).className = 'status-ok';
+            processedRows.push(data.data);
           } else {
             document.getElementById('status-' + i).textContent = 'fout: ' + (data.error || 'onbekend');
             document.getElementById('status-' + i).className = 'status-err';
@@ -156,6 +311,120 @@ UPLOAD_PAGE = """
       processBtn.textContent = 'Klaar';
       downloadBtn.href = '/api/download/' + sessionId;
       downloadBtn.style.display = 'inline-block';
+ 
+      renderReviewTable();
+      if (processedRows.length > 0) {
+        boekBtn.style.display = 'inline-block';
+      }
+    });
+ 
+    function maakSelect(opties, geselecteerd, onChange) {
+      const select = document.createElement('select');
+      opties.forEach(([code, omschrijving]) => {
+        const opt = document.createElement('option');
+        opt.value = code;
+        opt.textContent = code + ' - ' + omschrijving;
+        if (code === geselecteerd) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', e => onChange(e.target.value));
+      return select;
+    }
+ 
+    function renderReviewTable() {
+      reviewBody.innerHTML = '';
+      reviewTable.style.display = processedRows.length ? 'table' : 'none';
+ 
+      processedRows.forEach((rij, rijIndex) => {
+        const regels = (rij.btw_regels && rij.btw_regels.length) ? rij.btw_regels : [{}];
+        regels.forEach((regel, regelIndex) => {
+          const tr = document.createElement('tr');
+ 
+          const bestandTd = document.createElement('td');
+          bestandTd.textContent = regelIndex === 0 ? (rij.bestandsnaam || '') : '';
+          tr.appendChild(bestandTd);
+ 
+          [rij.leverancier, rij.factuurdatum, rij.factuurnummer].forEach(waarde => {
+            const td = document.createElement('td');
+            td.textContent = regelIndex === 0 ? (waarde ?? '') : '';
+            tr.appendChild(td);
+          });
+ 
+          [regel.btw_percentage, regel.bedrag_excl_btw, regel.btw_bedrag].forEach(waarde => {
+            const td = document.createElement('td');
+            td.textContent = waarde ?? '';
+            tr.appendChild(td);
+          });
+ 
+          const betaalTd = document.createElement('td');
+          betaalTd.appendChild(maakSelect(
+            rekeningOpties.betaalrekeningen, regel.betaalrekening || '1000',
+            v => { regel.betaalrekening = v; }
+          ));
+          tr.appendChild(betaalTd);
+ 
+          const kostenTd = document.createElement('td');
+          kostenTd.appendChild(maakSelect(
+            rekeningOpties.kostenrekeningen, regel.kostenrekening || '7012',
+            v => { regel.kostenrekening = v; }
+          ));
+          tr.appendChild(kostenTd);
+ 
+          const relatieTd = document.createElement('td');
+          if (regelIndex === 0) {
+            const relatieInput = document.createElement('input');
+            relatieInput.type = 'text';
+            relatieInput.value = rij.relatiecode || '';
+            relatieInput.placeholder = 'verplicht bij factuurnr.';
+            relatieInput.addEventListener('input', e => { rij.relatiecode = e.target.value; });
+            relatieTd.appendChild(relatieInput);
+          }
+          tr.appendChild(relatieTd);
+ 
+          const termijnTd = document.createElement('td');
+          if (regelIndex === 0) {
+            const termijnInput = document.createElement('input');
+            termijnInput.type = 'text';
+            termijnInput.value = rij.betalingstermijn || '0';
+            termijnInput.addEventListener('input', e => { rij.betalingstermijn = e.target.value; });
+            termijnTd.appendChild(termijnInput);
+          }
+          tr.appendChild(termijnTd);
+ 
+          const statusTd = document.createElement('td');
+          statusTd.className = 'boek-status';
+          if (regelIndex === 0) statusTd.id = `boekstatus-${rijIndex}`;
+          tr.appendChild(statusTd);
+ 
+          reviewBody.appendChild(tr);
+        });
+      });
+    }
+ 
+    boekBtn.addEventListener('click', async () => {
+      boekBtn.disabled = true;
+      boekBtn.textContent = 'Bezig met boeken...';
+ 
+      const res = await fetch('/api/boek/' + sessionId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(processedRows),
+      });
+      const data = await res.json();
+ 
+      (data.resultaten || []).forEach((resultaat, i) => {
+        const statusEl = document.getElementById(`boekstatus-${i}`);
+        if (!statusEl) return;
+        if (resultaat.success) {
+          statusEl.textContent = 'Geboekt (' + resultaat.mutatienummers.join(', ') + ')';
+          statusEl.style.color = '#16a34a';
+        } else {
+          statusEl.textContent = 'Fout: ' + resultaat.error;
+          statusEl.style.color = '#dc2626';
+        }
+      });
+ 
+      boekBtn.textContent = 'Klaar met boeken';
     });
   </script>
 </body>
@@ -196,22 +465,33 @@ def process_invoice():
         prompt = (
             "Dit is een foto van een factuur of bon. In Nederland zijn er drie BTW-tarieven: "
             "21%, 9% en 0%. Een factuur kan meerdere tarieven tegelijk bevatten (bijvoorbeeld "
-            "deels 21% en deels 9%). Haal de volgende gegevens eruit en geef ALLEEN een JSON "
+            "deels 21% en deels 9%). Kijk ook goed naar hoe er betaald is: staat er expliciet "
+            "'contant', 'cash' of een kassabon-kenmerk op, of staan er juist bankgegevens "
+            "(IBAN, rekeningnummer, 'overgemaakt', 'betaald via bank') op de factuur? "
+            "Bepaal voor elke BTW-regel ook of het gaat om INKOOP VAN MATERIAAL/GOEDEREN "
+            "die direct met de omzet te maken heeft (bijv. grondstoffen, dranken, "
+            "verpakkingen, ingrediënten - dingen die doorverkocht of verwerkt worden in "
+            "producten), of om een ALGEMENE KOST (bijv. huur, verzekering, abonnement, "
+            "brandstof, kantoorkosten, marketing - kosten die niets met specifieke omzet "
+            "te maken hebben). Haal de volgende gegevens eruit en geef ALLEEN een JSON "
             "object terug, niets anders, geen uitleg, geen markdown:\n"
             "{\n"
             '  "leverancier": "...",\n'
             '  "factuurdatum": "DD-MM-JJJJ",\n'
             '  "factuurnummer": "...",\n'
             '  "omschrijving": "...",\n'
+            '  "betaalmethode": "contant" of "bank" of null als onduidelijk,\n'
             '  "btw_regels": [\n'
-            '    {"btw_percentage": 21, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00},\n'
-            '    {"btw_percentage": 9, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00}\n'
+            '    {"btw_percentage": 21, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00, "kostentype": "inkoop_goederen" of "algemene_kost"},\n'
+            '    {"btw_percentage": 9, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00, "kostentype": "inkoop_goederen" of "algemene_kost"}\n'
             "  ]\n"
             "}\n"
             "BELANGRIJK: maak voor elk BTW-tarief dat op de factuur voorkomt een apart object in "
             "de 'btw_regels' lijst, ook als er maar één tarief is (dan bevat de lijst één object). "
-            "Gebruik alleen de tarieven 21, 9 of 0. Als een veld niet leesbaar of niet aanwezig is, "
-            "gebruik dan null. Gebruik een punt als decimaalteken."
+            "Gebruik alleen de tarieven 21, 9 of 0. Vul 'betaalmethode' alleen in als je het "
+            "ECHT duidelijk op de bon/factuur ziet staan - gok niet, gebruik anders null. "
+            "Als een ander veld niet leesbaar of niet aanwezig is, gebruik dan null. Gebruik "
+            "een punt als decimaalteken."
         )
  
         message = client.messages.create(
@@ -246,6 +526,50 @@ def process_invoice():
  
         data = json.loads(raw_text)
         data["bestandsnaam"] = file.filename
+        # Standaardwaarden toevoegen aan elke BTW-regel, die de gebruiker in het
+        # controlescherm zelf kan aanpassen vóór het boeken. Betaalrekening baseren
+        # we op wat de AI zag staan (contant -> Kas, bank -> Bank); bij twijfel
+        # gokken we niet en blijft Kas de gok totdat de gebruiker het corrigeert.
+        betaalmethode = (data.get("betaalmethode") or "").lower()
+        standaard_betaalrekening = "1010" if betaalmethode == "bank" else "1000"
+ 
+        # Check of deze leverancier een vast boekingsvoorbeeld heeft - zo ja, dan
+        # gebruiken we relatiecode/betalingstermijn daaruit. Kostenrekening komt,
+        # tenzij de leverancier een vaste rekening (of tarief-specifieke
+        # uitzondering) heeft, standaard uit het BTW-tarief van de regel
+        # (21% -> 7021, 9% -> 7022, 0% -> 7024).
+        mapping = zoek_leverancier_mapping(data.get("leverancier"))
+        if mapping:
+            data["relatiecode"] = mapping.get("relatiecode") or ""
+            data["betalingstermijn"] = mapping["betalingstermijn"]
+            vaste_kostenrekening = mapping.get("kostenrekening")
+            kostenrekening_per_btw = mapping.get("kostenrekening_per_btw") or {}
+            data["kruispost"] = mapping.get("kruispost")
+            data["eu_leverancier"] = mapping.get("eu_leverancier", False)
+        else:
+            data["relatiecode"] = ""
+            data["betalingstermijn"] = "0"
+            vaste_kostenrekening = None
+            kostenrekening_per_btw = {}
+            data["kruispost"] = None
+            data["eu_leverancier"] = False
+ 
+        for regel in data.get("btw_regels", []) or []:
+            btw_pct = regel.get("btw_percentage")
+            kostentype = regel.get("kostentype")
+            if btw_pct in kostenrekening_per_btw:
+                regel["kostenrekening"] = kostenrekening_per_btw[btw_pct]
+            elif vaste_kostenrekening:
+                regel["kostenrekening"] = vaste_kostenrekening
+            elif kostentype == "algemene_kost":
+                # Algemene kosten (huur, verzekering, abonnementen, etc.) horen niet
+                # op de inkoop-BTW-rekeningen thuis - "Overige inkopen" is hier een
+                # duidelijke plek-houder die om handmatige controle vraagt.
+                regel["kostenrekening"] = "7012"
+            else:
+                # Inkoop van materiaal/goederen die met de omzet te maken heeft
+                regel["kostenrekening"] = BTW_KOSTENREKENING_DEFAULT.get(btw_pct, "7012")
+            regel["betaalrekening"] = standaard_betaalrekening
         SESSIONS[session_id].append(data)
  
         return jsonify({"success": True, "data": data})
@@ -310,6 +634,55 @@ def download_excel(session_id):
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+ 
+ 
+@app.route("/api/rekeningen")
+def get_rekeningen():
+    return jsonify({
+        "betaalrekeningen": BURGERME_BETAALREKENINGEN,
+        "kostenrekeningen": BURGERME_KOSTENREKENINGEN,
+    })
+ 
+ 
+@app.route("/api/boek/<session_id>", methods=["POST"])
+def boek_facturen(session_id):
+    if session_id not in SESSIONS:
+        return jsonify({"success": False, "error": "sessie niet gevonden"}), 404
+ 
+    # De frontend stuurt de (eventueel door de gebruiker aangepaste) rijen mee,
+    # zodat we altijd boeken met wat er op het scherm staat, niet met de
+    # oorspronkelijke AI-extractie.
+    edited_rows = request.get_json(silent=True) or []
+    resultaten = []
+ 
+    for row in edited_rows:
+        try:
+            regels = row.get("btw_regels") or []
+            betaalrekening = (regels[0].get("betaalrekening") if regels else None) or "1000"
+            mutatienummers = eboekhouden.boek_bonnetje(
+                klant_prefix="BURGERME",
+                leverancier=row.get("leverancier"),
+                factuurdatum_ddmmjjjj=row.get("factuurdatum"),
+                factuurnummer=row.get("factuurnummer"),
+                omschrijving=row.get("omschrijving"),
+                betaalrekening=betaalrekening,
+                regels=regels,
+                relatiecode=row.get("relatiecode") or "",
+                betalingstermijn=row.get("betalingstermijn") or "0",
+                eu_leverancier=row.get("eu_leverancier", False),
+                kruispost=row.get("kruispost"),
+            )
+            resultaten.append({
+                "bestandsnaam": row.get("bestandsnaam"),
+                "success": True,
+                "mutatienummers": mutatienummers,
+            })
+        except eboekhouden.EBoekhoudenError as e:
+            resultaten.append({"bestandsnaam": row.get("bestandsnaam"), "success": False, "error": str(e)})
+        except Exception as e:
+            resultaten.append({"bestandsnaam": row.get("bestandsnaam"), "success": False, "error": str(e)})
+ 
+    return jsonify({"resultaten": resultaten})
  
  
 @app.route("/health")
