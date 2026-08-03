@@ -1,4 +1,3 @@
-
 """
 e-Boekhouden SOAP koppeling
 ---------------------------
@@ -50,6 +49,33 @@ def _get_credentials(klant_prefix):
     return username, sec1, sec2
  
  
+def _zoek_relatiecode_op_naam(soap_client, session_id, sec2, naam):
+    """
+    Zoekt een relatie op in e-Boekhouden via de bedrijfsnaam (Trefwoord), en geeft
+    de bijbehorende relatiecode terug als er precies één match is. Geeft None
+    terug als er geen (of meerdere onduidelijke) matches zijn.
+    """
+    if not naam:
+        return None
+    try:
+        result = soap_client.service.GetRelaties(session_id, sec2, {"Trefwoord": naam})
+    except Exception:
+        return None
+    if getattr(result, "LastErrorCode", None):
+        return None
+    relaties_container = getattr(result, "Relaties", None)
+    if not relaties_container:
+        return None
+    relaties = getattr(relaties_container, "cRelatie", None)
+    if not relaties:
+        return None
+    if not isinstance(relaties, list):
+        relaties = [relaties]
+    if len(relaties) == 1:
+        return relaties[0].Code
+    return None  # meerdere matches: niet gokken, gebruiker moet zelf kiezen
+ 
+ 
 def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnummer,
                    omschrijving, betaalrekening, regels, relatiecode="", betalingstermijn="0",
                    crediteurenrekening="1700", eu_leverancier=False, kruispost=None):
@@ -57,8 +83,10 @@ def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnumme
     Boekt één factuur of bonnetje (met mogelijk meerdere BTW-regels).
  
     - Heeft de factuur een factuurnummer? -> Soort "FactuurOntvangen", geboekt op de
-      crediteurenrekening (standaard 1700). Vereist een geldige RelatieCode (de
-      leverancier moet als relatie bestaan in e-Boekhouden).
+      crediteurenrekening (standaard 1700). Vereist een relatie (leverancier) die al
+      bestaat in e-Boekhouden. Is er geen relatiecode meegegeven, dan zoekt de app
+      'm automatisch op via de leveranciersnaam (GetRelaties) - je hoeft dus niet
+      voor elke leverancier handmatig een nummer te verzinnen.
     - Geen factuurnummer (kassabonnetje)? -> Soort "GeldUitgegeven", direct van de
       gekozen betaalrekening (kas/bank/pin).
  
@@ -82,13 +110,6 @@ def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnumme
     heeft_factuurnummer = bool((factuurnummer or "").strip())
     soort = "FactuurOntvangen" if heeft_factuurnummer else "GeldUitgegeven"
  
-    if soort == "FactuurOntvangen" and not (relatiecode or "").strip():
-        raise EBoekhoudenError(
-            f"Factuur van '{leverancier}' heeft een factuurnummer maar geen relatiecode. "
-            "Bij 'Factuur ontvangen' is een relatiecode verplicht - voeg deze leverancier "
-            "toe aan de leverancier-mapping of vul de relatiecode handmatig in."
-        )
- 
     username, sec1, sec2 = _get_credentials(klant_prefix)
  
     soap_client = Client(WSDL_URL)
@@ -100,6 +121,17 @@ def boek_bonnetje(klant_prefix, leverancier, factuurdatum_ddmmjjjj, factuurnumme
         if getattr(open_result, "LastErrorCode", None):
             raise EBoekhoudenError(f"Kon geen sessie openen: {open_result.LastErrorDescription}")
         session_id = open_result.SessionID
+ 
+        # Geen relatiecode meegegeven? Probeer 'm automatisch op te zoeken op naam.
+        if soort == "FactuurOntvangen" and not (relatiecode or "").strip():
+            relatiecode = _zoek_relatiecode_op_naam(soap_client, session_id, sec2, leverancier) or ""
+ 
+        if soort == "FactuurOntvangen" and not relatiecode:
+            raise EBoekhoudenError(
+                f"Kon geen (eenduidige) relatie vinden voor '{leverancier}' in e-Boekhouden. "
+                "Maak deze leverancier eerst aan als relatie in e-Boekhouden (Relaties), "
+                "of vul de relatiecode handmatig in bij het controleren."
+            )
  
         # Datum van DD-MM-JJJJ naar JJJJ-MM-DD (wat e-Boekhouden verwacht)
         try:
