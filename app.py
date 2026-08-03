@@ -1,4 +1,3 @@
-
 """
 Factuur Upload & Extractie Tool
 --------------------------------
@@ -201,7 +200,7 @@ UPLOAD_PAGE = """
   <p>Sleep meerdere factuurfoto's hieronder, of klik om te selecteren. Geen limiet op aantal bestanden.</p>
  
   <div id="dropzone">Sleep foto's hierheen, of klik om te kiezen</div>
-  <input type="file" id="fileInput" multiple accept="image/*">
+  <input type="file" id="fileInput" multiple accept="image/*,.pdf">
  
   <div id="cameraRow">
     <button type="button" id="cameraBtn">📷 Bonnetje fotograferen</button>
@@ -458,12 +457,13 @@ def process_invoice():
         return jsonify({"success": False, "error": "geen bestand ontvangen"}), 400
  
     try:
-        image_bytes = file.read()
-        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        media_type = file.mimetype or "image/jpeg"
+        file_bytes = file.read()
+        file_b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
+        is_pdf = (file.mimetype == "application/pdf") or (file.filename or "").lower().endswith(".pdf")
+        media_type = "application/pdf" if is_pdf else (file.mimetype or "image/jpeg")
  
         prompt = (
-            "Dit is een foto van een factuur of bon. In Nederland zijn er drie BTW-tarieven: "
+            "Dit is een foto of PDF-document van een factuur of bon. In Nederland zijn er drie BTW-tarieven: "
             "21%, 9% en 0%. Een factuur kan meerdere tarieven tegelijk bevatten (bijvoorbeeld "
             "deels 21% en deels 9%). Kijk ook goed naar hoe er betaald is: staat er expliciet "
             "'contant', 'cash' of een kassabon-kenmerk op, of staan er juist bankgegevens "
@@ -494,6 +494,26 @@ def process_invoice():
             "een punt als decimaalteken."
         )
  
+        content_block = (
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": file_b64,
+                },
+            }
+            if is_pdf
+            else {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": file_b64,
+                },
+            }
+        )
+ 
         message = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1000,
@@ -501,14 +521,7 @@ def process_invoice():
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": image_b64,
-                            },
-                        },
+                        content_block,
                         {"type": "text", "text": prompt},
                     ],
                 }
