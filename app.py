@@ -1,3 +1,4 @@
+
 """
 Factuur Upload & Extractie Tool
 --------------------------------
@@ -111,6 +112,15 @@ BURGERME_LEVERANCIER_MAPPING = {
         "relatiecode": None,  # nog te bevestigen door Wais - laat leeg tot bekend
         "betalingstermijn": "0",
         "kruispost": {"kostenrekening": "44991", "kruispost_rekening": "23103"},
+        "zoeknaam": "Thuisbezorgd",
+    },
+    "takeaway.com": {
+        # Zelfde bedrijf als Thuisbezorgd.nl (Takeaway.com is de eigenaar/merknaam
+        # op sommige facturen) - zelfde boekingsafspraken
+        "relatiecode": None,  # nog te bevestigen door Wais - laat leeg tot bekend
+        "betalingstermijn": "0",
+        "kruispost": {"kostenrekening": "44991", "kruispost_rekening": "23103"},
+        "zoeknaam": "Thuisbezorgd",  # de bestaande relatie heet vermoedelijk zo, niet 'Takeaway.com'
     },
     "uber eats": {
         "relatiecode": "0122",
@@ -555,10 +565,18 @@ def process_invoice():
         if mapping:
             data["relatiecode"] = mapping.get("relatiecode") or ""
             data["betalingstermijn"] = mapping["betalingstermijn"]
-            vaste_kostenrekening = mapping.get("kostenrekening")
+            kruispost = mapping.get("kruispost")
+            # Bij het bezorgplatform-patroon hoort de kostenregel op de kruispost-
+            # kostenrekening (bijv. 44991), niet op de generieke BTW-standaard.
+            vaste_kostenrekening = mapping.get("kostenrekening") or (kruispost or {}).get("kostenrekening")
             kostenrekening_per_btw = mapping.get("kostenrekening_per_btw") or {}
-            data["kruispost"] = mapping.get("kruispost")
+            data["kruispost"] = kruispost
             data["eu_leverancier"] = mapping.get("eu_leverancier", False)
+            # Voor de automatische relatie-opzoeking gebruiken we een kortere,
+            # betrouwbaardere zoeknaam als die is opgegeven (de volledige
+            # AI-herkende naam matcht vaak niet exact met hoe de relatie in
+            # e-Boekhouden is vastgelegd).
+            data["zoeknaam_relatie"] = mapping.get("zoeknaam") or data.get("leverancier")
         else:
             data["relatiecode"] = ""
             data["betalingstermijn"] = "0"
@@ -566,6 +584,7 @@ def process_invoice():
             kostenrekening_per_btw = {}
             data["kruispost"] = None
             data["eu_leverancier"] = False
+            data["zoeknaam_relatie"] = data.get("leverancier")
  
         for regel in data.get("btw_regels", []) or []:
             btw_pct = regel.get("btw_percentage")
@@ -684,6 +703,7 @@ def boek_facturen(session_id):
                 betalingstermijn=row.get("betalingstermijn") or "0",
                 eu_leverancier=row.get("eu_leverancier", False),
                 kruispost=row.get("kruispost"),
+                zoeknaam_relatie=row.get("zoeknaam_relatie") or row.get("leverancier"),
             )
             resultaten.append({
                 "bestandsnaam": row.get("bestandsnaam"),
@@ -706,3 +726,4 @@ def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+ 
