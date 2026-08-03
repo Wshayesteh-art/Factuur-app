@@ -240,7 +240,8 @@ UPLOAD_PAGE = """
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Factuur Upload</title>
+  <title>Wensboekhouders</title>
+  <meta name="apple-mobile-web-app-title" content="Wensboekhouders">
   <style>
     body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
     h1 { font-size: 22px; }
@@ -273,7 +274,7 @@ UPLOAD_PAGE = """
   </style>
 </head>
 <body>
-  <h1>Factuur Upload &amp; Extractie</h1>
+  <h1>Wensboekhouders</h1>
   <p>Sleep meerdere factuurfoto's hieronder, of klik om te selecteren. Geen limiet op aantal bestanden.</p>
  
   <div id="dropzone">Sleep foto's hierheen, of klik om te kiezen</div>
@@ -580,34 +581,40 @@ def process_invoice():
  
         prompt = (
             "Dit is een foto of PDF-document van een factuur of bon. In Nederland zijn er drie BTW-tarieven: "
-            "21%, 9% en 0%. Een factuur kan meerdere tarieven tegelijk bevatten (bijvoorbeeld "
-            "deels 21% en deels 9%). Kijk ook goed naar hoe er betaald is: staat er expliciet "
+            "21%, 9% en 0%. Kijk ook goed naar hoe er betaald is: staat er expliciet "
             "'contant', 'cash' of een kassabon-kenmerk op, of staan er juist bankgegevens "
             "(IBAN, rekeningnummer, 'overgemaakt', 'betaald via bank') op de factuur? "
-            "Bepaal voor elke BTW-regel ook of het gaat om INKOOP VAN MATERIAAL/GOEDEREN "
+            "\n\n"
+            "BELANGRIJKSTE INSTRUCTIE: een factuur kan meerdere APARTE POSTEN bevatten die "
+            "niets met elkaar te maken hebben (bijvoorbeeld een voertuig ÉN losse onderdelen "
+            "op dezelfde factuur, of eten ÉN drinken). Maak voor ELKE aparte post een eigen "
+            "regel met zijn EIGEN omschrijving en EIGEN bedrag - ook als twee posten toevallig "
+            "hetzelfde BTW-tarief hebben. Plak nooit de hele factuurtekst als omschrijving bij "
+            "elke regel; elke regel krijgt alleen de omschrijving die specifiek bij DIE post "
+            "hoort, zodat someone die de rijen leest meteen ziet welk bedrag bij welke post "
+            "hoort.\n\n"
+            "Bepaal voor elke regel ook of het gaat om INKOOP VAN MATERIAAL/GOEDEREN "
             "die direct met de omzet te maken heeft (bijv. grondstoffen, dranken, "
-            "verpakkingen, ingrediënten - dingen die doorverkocht of verwerkt worden in "
-            "producten), of om een ALGEMENE KOST (bijv. huur, verzekering, abonnement, "
-            "brandstof, kantoorkosten, marketing - kosten die niets met specifieke omzet "
-            "te maken hebben). Haal de volgende gegevens eruit en geef ALLEEN een JSON "
-            "object terug, niets anders, geen uitleg, geen markdown:\n"
+            "verpakkingen, ingrediënten, voertuigen/onderdelen voor doorverkoop - dingen die "
+            "doorverkocht of verwerkt worden), of om een ALGEMENE KOST (bijv. huur, "
+            "verzekering, abonnement, brandstof, kantoorkosten, marketing). Haal de volgende "
+            "gegevens eruit en geef ALLEEN een JSON object terug, niets anders, geen uitleg, "
+            "geen markdown:\n"
             "{\n"
             '  "leverancier": "...",\n'
             '  "factuurdatum": "DD-MM-JJJJ",\n'
             '  "factuurnummer": "...",\n'
-            '  "omschrijving": "...",\n'
             '  "betaalmethode": "contant" of "bank" of null als onduidelijk,\n'
             '  "btw_regels": [\n'
-            '    {"btw_percentage": 21, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00, "kostentype": "inkoop_goederen" of "algemene_kost"},\n'
-            '    {"btw_percentage": 9, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00, "kostentype": "inkoop_goederen" of "algemene_kost"}\n'
+            '    {"omschrijving": "korte, specifieke omschrijving van DEZE post", '
+            '"btw_percentage": 21, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00, '
+            '"kostentype": "inkoop_goederen" of "algemene_kost"}\n'
             "  ]\n"
             "}\n"
-            "BELANGRIJK: maak voor elk BTW-tarief dat op de factuur voorkomt een apart object in "
-            "de 'btw_regels' lijst, ook als er maar één tarief is (dan bevat de lijst één object). "
-            "Gebruik alleen de tarieven 21, 9 of 0. Vul 'betaalmethode' alleen in als je het "
-            "ECHT duidelijk op de bon/factuur ziet staan - gok niet, gebruik anders null. "
-            "Als een ander veld niet leesbaar of niet aanwezig is, gebruik dan null. Gebruik "
-            "een punt als decimaalteken."
+            "BELANGRIJK: gebruik alleen de tarieven 21, 9 of 0. Vul 'betaalmethode' alleen in "
+            "als je het ECHT duidelijk op de bon/factuur ziet staan - gok niet, gebruik anders "
+            "null. Als een ander veld niet leesbaar of niet aanwezig is, gebruik dan null. "
+            "Gebruik een punt als decimaalteken."
         )
  
         content_block = (
@@ -749,7 +756,7 @@ def download_excel(session_id):
                 row.get("factuurnummer"),
                 btw_weergave,
                 regel.get("bedrag_excl_btw"),
-                row.get("omschrijving"),
+                regel.get("omschrijving") or row.get("omschrijving"),
             ])
  
     # Kolombreedte iets vergroten voor leesbaarheid
@@ -792,12 +799,15 @@ def boek_facturen(session_id):
         try:
             regels = row.get("btw_regels") or []
             betaalrekening = (regels[0].get("betaalrekening") if regels else None) or "1000"
+            gecombineerde_omschrijving = "; ".join(
+                r.get("omschrijving") for r in regels if r.get("omschrijving")
+            ) or row.get("omschrijving")
             mutatienummers = eboekhouden.boek_bonnetje(
                 klant_prefix="BURGERME",
                 leverancier=row.get("leverancier"),
                 factuurdatum_ddmmjjjj=row.get("factuurdatum"),
                 factuurnummer=row.get("factuurnummer"),
-                omschrijving=row.get("omschrijving"),
+                omschrijving=gecombineerde_omschrijving,
                 betaalrekening=betaalrekening,
                 regels=regels,
                 relatiecode=row.get("relatiecode") or "",
@@ -827,3 +837,4 @@ def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+ 
