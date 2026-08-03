@@ -194,19 +194,24 @@ def process_invoice():
         media_type = file.mimetype or "image/jpeg"
  
         prompt = (
-            "Dit is een foto van een factuur of bon. Haal de volgende gegevens eruit en geef "
-            "ALLEEN een JSON object terug, niets anders, geen uitleg, geen markdown:\n"
+            "Dit is een foto van een factuur of bon. In Nederland zijn er drie BTW-tarieven: "
+            "21%, 9% en 0%. Een factuur kan meerdere tarieven tegelijk bevatten (bijvoorbeeld "
+            "deels 21% en deels 9%). Haal de volgende gegevens eruit en geef ALLEEN een JSON "
+            "object terug, niets anders, geen uitleg, geen markdown:\n"
             "{\n"
             '  "leverancier": "...",\n'
             '  "factuurdatum": "DD-MM-JJJJ",\n'
             '  "factuurnummer": "...",\n'
-            '  "bedrag_excl_btw": 0.00,\n'
-            '  "btw_bedrag": 0.00,\n'
-            '  "btw_percentage": 0,\n'
-            '  "bedrag_incl_btw": 0.00,\n'
-            '  "omschrijving": "..."\n'
+            '  "omschrijving": "...",\n'
+            '  "btw_regels": [\n'
+            '    {"btw_percentage": 21, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00},\n'
+            '    {"btw_percentage": 9, "bedrag_excl_btw": 0.00, "btw_bedrag": 0.00}\n'
+            "  ]\n"
             "}\n"
-            "Als een veld niet leesbaar of niet aanwezig is, gebruik dan null. Gebruik een punt als decimaalteken."
+            "BELANGRIJK: maak voor elk BTW-tarief dat op de factuur voorkomt een apart object in "
+            "de 'btw_regels' lijst, ook als er maar één tarief is (dan bevat de lijst één object). "
+            "Gebruik alleen de tarieven 21, 9 of 0. Als een veld niet leesbaar of niet aanwezig is, "
+            "gebruik dan null. Gebruik een punt als decimaalteken."
         )
  
         message = client.messages.create(
@@ -264,22 +269,31 @@ def download_excel(session_id):
  
     headers = [
         "Bestandsnaam", "Leverancier", "Factuurdatum", "Factuurnummer",
-        "Bedrag excl. BTW", "BTW bedrag", "BTW %", "Bedrag incl. BTW", "Omschrijving",
+        "BTW %", "Bedrag excl. BTW", "BTW bedrag", "Bedrag incl. BTW", "Omschrijving",
     ]
     ws.append(headers)
  
     for row in rows:
-        ws.append([
-            row.get("bestandsnaam"),
-            row.get("leverancier"),
-            row.get("factuurdatum"),
-            row.get("factuurnummer"),
-            row.get("bedrag_excl_btw"),
-            row.get("btw_bedrag"),
-            row.get("btw_percentage"),
-            row.get("bedrag_incl_btw"),
-            row.get("omschrijving"),
-        ])
+        btw_regels = row.get("btw_regels") or []
+        if not btw_regels:
+            # Fallback: geen btw_regels gevonden, toch één lege regel zodat de factuur niet verdwijnt
+            btw_regels = [{"btw_percentage": None, "bedrag_excl_btw": None, "btw_bedrag": None}]
+ 
+        for regel in btw_regels:
+            excl = regel.get("bedrag_excl_btw")
+            btw = regel.get("btw_bedrag")
+            incl = (excl + btw) if isinstance(excl, (int, float)) and isinstance(btw, (int, float)) else None
+            ws.append([
+                row.get("bestandsnaam"),
+                row.get("leverancier"),
+                row.get("factuurdatum"),
+                row.get("factuurnummer"),
+                regel.get("btw_percentage"),
+                excl,
+                btw,
+                incl,
+                row.get("omschrijving"),
+            ])
  
     # Kolombreedte iets vergroten voor leesbaarheid
     for col_idx, header in enumerate(headers, start=1):
@@ -306,4 +320,3 @@ def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
